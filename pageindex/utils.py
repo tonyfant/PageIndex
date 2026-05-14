@@ -1,5 +1,7 @@
-import litellm
-import logging
+import ollama
+import tiktoken
+from ollama import AsyncClient
+import  litellm
 import os
 import textwrap
 from datetime import datetime
@@ -16,6 +18,7 @@ import logging
 import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
+import re
 
 # Backward compatibility: support CHATGPT_API_KEY as alias for OPENAI_API_KEY
 if not os.getenv("OPENAI_API_KEY") and os.getenv("CHATGPT_API_KEY"):
@@ -23,65 +26,132 @@ if not os.getenv("OPENAI_API_KEY") and os.getenv("CHATGPT_API_KEY"):
 
 litellm.drop_params = True
 
+
+
+
 def count_tokens(text, model=None):
     if not text:
         return 0
-    return litellm.token_counter(model=model, text=text)
+    encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
 
 
-def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
-    if model:
-        model = model.removeprefix("litellm/")
-    max_retries = 10
+
+def llm_completion(model, prompt, chat_history=None, return_finish_reason=False, base_model=None):
+    finish_reason = "finished"
+    content = ""
+
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
-    for i in range(max_retries):
+
+    try:
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "options": {"temperature": 0},
+        }
+
+        if base_model:
+            kwargs["format"] = "json"
+            schema_str = json.dumps(base_model.model_json_schema())
+            # FIX 1: Spieghiamo a Ollama che vogliamo I DATI, non lo schema indietro!
+            messages[-1]["content"] += f"\n\nIMPORTANT: Return ONLY a JSON object/array containing the actual extracted data. Use this JSON schema as a strict blueprint for your format:\n{schema_str}\nDO NOT output the schema itself, only the data."
+
+        response = ollama.chat(**kwargs)
+        content = response['message']['content']
+
+    except Exception as e:
+        logging.warning(f"Ollama fallito o non disponibile, passo a LiteLLM (Backup). Errore: {e}")
+
         try:
             response = litellm.completion(
                 model=model,
                 messages=messages,
-                temperature=0,
+                temperature=0
             )
             content = response.choices[0].message.content
+        except Exception as e_litellm:
+            logging.error(f"Anche LiteLLM è fallito: {e_litellm}")
             if return_finish_reason:
-                finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
-                return content, finish_reason
-            return content
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                time.sleep(1)
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                if return_finish_reason:
-                    return "", "error"
-                return ""
+                return "", "error"
+            return ""
 
+    # === VALIDAZIONE PYDANTIC ===
+    if base_model:
+        is_array = base_model.model_json_schema().get('type') == 'array'
+
+        if not content or content.strip() == "":
+            content = [] if is_array else {}
+            finish_reason = "error"
+        else:
+            if content.strip().startswith("```"):
+                content = content.strip().strip("`")
+                if content.lower().startswith("json"):
+                    content = content[4:].strip()
+
+            # --- FIX SUPER-INTELLIGENTE PER LE LISTE ---
+            try:
+                if is_array:
+                    raw_temp = json.loads(content)
+                    if isinstance(raw_temp, dict):
+                        has_inner_list = False
+
+                        # Caso 1: L'LLM ha impacchettato la lista in una chiave (es. {"TOCNodeList": [...]})
+                        for val in raw_temp.values():
+                            if isinstance(val, list):
+                                content = json.dumps(val)
+                                has_inner_list = True
+                                break
+
+                        # Caso 2 (Il tuo errore!): L'LLM ha generato un singolo oggetto dimenticando le parentesi [ ]
+                        if not has_inner_list:
+                            content = json.dumps([raw_temp])  # Lo chiudiamo in una lista!
+            except Exception:
+                pass  # Se json.loads fallisce, Pydantic sotto darà l'errore standard
+            # --------------------------------------------
+
+            try:
+                parsed_data = base_model.model_validate_json(content)
+                content = parsed_data.model_dump()
+            except Exception as parse_error:
+                logging.error(f"Errore di validazione Pydantic: {parse_error}\nContenuto ricevuto: {content}")
+                content = [] if is_array else {}
+                finish_reason = "error"
+
+    if return_finish_reason:
+        return content, finish_reason
+    return content
 
 
 async def llm_acompletion(model, prompt):
-    if model:
-        model = model.removeprefix("litellm/")
-    max_retries = 10
     messages = [{"role": "user", "content": prompt}]
-    for i in range(max_retries):
+    is_json_request = "json" in prompt.lower() or "{" in prompt
+
+    # # tbd_pageindex
+
+    try:
+        async_client = AsyncClient()
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "options": {"temperature": 0}
+        }
+        if is_json_request:
+            kwargs["format"] = "json"
+        response = await async_client.chat(**kwargs)
+        return response['message']['content']
+
+    except Exception:
         try:
             response = await litellm.acompletion(
                 model=model,
                 messages=messages,
-                temperature=0,
+                temperature=0
             )
             return response.choices[0].message.content
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                await asyncio.sleep(1)
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return ""
-            
-            
+        except Exception:
+            return ""
+
+
 def get_json_content(response):
     start_idx = response.find("```json")
     if start_idx != -1:
@@ -391,7 +461,8 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
             page_text = page.extract_text()
-            token_length = litellm.token_counter(model=model, text=page_text)
+            # Modifica: usiamo la nostra funzione locale invece di litellm
+            token_length = count_tokens(text=page_text)
             page_list.append((page_text, token_length))
         return page_list
     elif pdf_parser == "PyMuPDF":
@@ -403,12 +474,12 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
         page_list = []
         for page in doc:
             page_text = page.get_text()
-            token_length = litellm.token_counter(model=model, text=page_text)
+            # Modifica: usiamo la nostra funzione locale invece di litellm
+            token_length = count_tokens(text=page_text)
             page_list.append((page_text, token_length))
         return page_list
     else:
         raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
-
         
 
 def get_text_of_pdf_pages(pdf_pages, start_page, end_page):

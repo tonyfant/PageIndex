@@ -14,15 +14,19 @@ from .utils import ConfigLoader, remove_fields
 
 META_INDEX = "_meta.json"
 
+# def _normalize_retrieve_model(model: str) -> str:
+#     """Preserve supported Agents SDK prefixes and route other provider paths via LiteLLM."""
+#     passthrough_prefixes = ("litellm/", "openai/")
+#     if not model or "/" not in model:
+#         return model
+#     if model.startswith(passthrough_prefixes):
+#         return model
+#     return f"litellm/{model}"
 
+# Sostituisci la funzione originale con questa
 def _normalize_retrieve_model(model: str) -> str:
-    """Preserve supported Agents SDK prefixes and route other provider paths via LiteLLM."""
-    passthrough_prefixes = ("litellm/", "openai/")
-    if not model or "/" not in model:
-        return model
-    if model.startswith(passthrough_prefixes):
-        return model
-    return f"litellm/{model}"
+    """Restituisce il nome del modello pulito per Ollama."""
+    return model
 
 
 class PageIndexClient:
