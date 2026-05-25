@@ -45,8 +45,8 @@ def build_pageindex_workspace(input_folder: str, model_name: str, workspace_path
 
 build_pageindex_workspace(
     input_folder="./examples/documents/test",
-    # model_name="gpt-5-nano",
-    model_name="gemma4:e4b",
+    model_name="gpt-5-mini",
+    # model_name="gemma4:e4b",
     workspace_path="./workspace_test",
     force=True
 )

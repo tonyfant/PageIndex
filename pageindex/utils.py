@@ -74,8 +74,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False,
             if return_finish_reason:
                 return "", "error"
             return ""
-
-    # === VALIDAZIONE PYDANTIC ===
+    #pydantic validation
     if base_model:
         is_array = base_model.model_json_schema().get('type') == 'array'
 
@@ -87,27 +86,22 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False,
                 content = content.strip().strip("`")
                 if content.lower().startswith("json"):
                     content = content[4:].strip()
-
-            # --- FIX SUPER-INTELLIGENTE PER LE LISTE ---
             try:
                 if is_array:
                     raw_temp = json.loads(content)
                     if isinstance(raw_temp, dict):
                         has_inner_list = False
 
-                        # Caso 1: L'LLM ha impacchettato la lista in una chiave (es. {"TOCNodeList": [...]})
                         for val in raw_temp.values():
                             if isinstance(val, list):
                                 content = json.dumps(val)
                                 has_inner_list = True
                                 break
 
-                        # Caso 2 (Il tuo errore!): L'LLM ha generato un singolo oggetto dimenticando le parentesi [ ]
                         if not has_inner_list:
                             content = json.dumps([raw_temp])  # Lo chiudiamo in una lista!
             except Exception:
                 pass  # Se json.loads fallisce, Pydantic sotto darà l'errore standard
-            # --------------------------------------------
 
             try:
                 parsed_data = base_model.model_validate_json(content)
